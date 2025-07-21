@@ -52,6 +52,7 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         One of the following
         * ``'region'`` - dispersion parameter of BetaBinomial is constant per region across cells
         * ``'region-cell'`` - dispersion can differ for every region in every cell
+        * ``'nu'`` - dispersion of BetaBinomial(alpha,beta) for every region in every cell
     """
 
     def __init__(
@@ -67,7 +68,7 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         dropout_rate: float = 0.1,
         log_variational: bool = True,
         likelihood: Literal["betabinomial", "binomial"] = "betabinomial",
-        dispersion: Literal["region", "region-cell"] = "region",
+        dispersion: Literal["region", "region-cell", "nu"] = "region",
     ):
         super().__init__()
         self.n_latent = n_latent
@@ -266,11 +267,16 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
 
             if self.dispersion == "region":
                 px_gamma = torch.sigmoid(self.px_gamma[context])
+            elif self.dispersion == "nu":
+                px_gamma = torch.log1p(cov + 1e-5)
 
             if self.likelihood == "binomial":
                 dist = Binomial(probs=px_mu, total_count=cov)
             elif self.likelihood == "betabinomial":
-                dist = BetaBinomial(mu=px_mu, gamma=px_gamma, total_count=cov)
+                if self.dispersion != "nu":
+                    dist = BetaBinomial(mu=px_mu, gamma=px_gamma, total_count=cov)
+                else:
+                    dist = BetaBinomial(alpha=px_mu*px_gamma, beta=(1-px_mu)*px_gamma, total_count=cov)
 
             if n_samples > 1:
                 exprs_ = dist.sample()
