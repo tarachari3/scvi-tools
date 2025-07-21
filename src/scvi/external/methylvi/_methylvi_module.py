@@ -273,12 +273,10 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
             if self.likelihood == "binomial":
                 dist = Binomial(probs=px_mu, total_count=cov)
             elif self.likelihood == "betabinomial":
-                if self.dispersion != "nu":
-                    dist = BetaBinomial(mu=px_mu, gamma=px_gamma, total_count=cov)
-                else:
-                    alpha = px_mu * px_gamma
-                    beta = (1.0 - px_mu) * px_gamma
-                    dist = BetaBinomial(alpha=alpha, beta=beta, total_count=cov)
+                if self.dispersion == "nu":
+                    px_gamma = 1 / (px_gamma + 1)
+                dist = BetaBinomial(mu=px_mu, gamma=px_gamma, total_count=cov)
+                
 
             if n_samples > 1:
                 exprs_ = dist.sample()
