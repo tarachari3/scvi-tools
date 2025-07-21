@@ -276,7 +276,9 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
                 if self.dispersion != "nu":
                     dist = BetaBinomial(mu=px_mu, gamma=px_gamma, total_count=cov)
                 else:
-                    dist = BetaBinomial(alpha=px_mu*px_gamma, beta=(1-px_mu)*px_gamma, total_count=cov)
+                    alpha = px_mu * px_gamma
+                    beta = (1.0 - px_mu) * px_gamma
+                    dist = BetaBinomial(alpha=alpha, beta=beta, total_count=cov)
 
             if n_samples > 1:
                 exprs_ = dist.sample()
