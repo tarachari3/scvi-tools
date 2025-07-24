@@ -400,7 +400,9 @@ class BSSeqModuleMixin:
             if self.dispersion == "region":
                 px_gamma = torch.sigmoid(self.px_gamma[context])
             elif self.dispersion == "nu":
-                px_gamma = torch.log1p(cov + 1e-5)
+                #px_gamma = torch.log1p(cov + 1e-5)
+                a = 1.14*torch.log2(cov +1) - 2.21
+                px_gamma = 2.14 * (1/(1+torch.exp(-a))) #nu_max * inv_logit(a)
 
             if self.likelihood == "binomial":
                 dist = Binomial(probs=px_mu, total_count=cov)
