@@ -69,6 +69,7 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         log_variational: bool = True,
         likelihood: Literal["betabinomial", "binomial"] = "betabinomial",
         dispersion: Literal["region", "region-cell", "nu"] = "region",
+        nu_params: dict = None,
     ):
         super().__init__()
         self.n_latent = n_latent
@@ -113,6 +114,19 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
                     )
                 }
             )
+
+        if nu_params is None:
+            nu_params = {
+                "nu_max": 1.0,
+                "m": 1.0,
+                "b": 1.0,
+            }
+        else:
+            expected_keys = {"nu_max", "m", "b"}
+            if set(nu_params.keys()) != expected_keys:
+                raise ValueError(f"`nu_params` must have keys {expected_keys}, but got {nu_params.keys()}")
+            
+        self.nu_params = nu_params
 
     def _get_inference_input(self, tensors):
         """Parse the dictionary to get appropriate args"""
@@ -268,9 +282,10 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
             if self.dispersion == "region":
                 px_gamma = torch.sigmoid(self.px_gamma[context])
             elif self.dispersion == "nu":
-                #px_gamma = torch.log1p(cov + 1e-5)
-                a = 1.14*torch.log2(cov +1) - 2.21
-                px_gamma = 2.14 * (1/(1+torch.exp(-a))) #nu_max * inv_logit(a)
+                # # px_gamma = torch.log1p(cov + 1e-5)
+                # a = 1.14*torch.log2(cov +1) - 2.21
+                a = self.nu_params["m"]*torch.log2(cov +1) + self.nu_params["b"]
+                px_gamma = self.nu_params["nu_max"] * (1/(1+torch.exp(-a))) #2.14, nu_max * inv_logit(a)
 
             if self.likelihood == "binomial":
                 dist = Binomial(probs=px_mu, total_count=cov)
