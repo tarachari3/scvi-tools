@@ -38,10 +38,14 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         Number of nodes per hidden layer
     n_latent
         Dimensionality of the latent space
-    n_layers
-        Number of hidden layers used for encoder and decoder NNs
-    dropout_rate
-        Dropout rate for neural networks
+    n_layers_enc
+        Number of hidden layers used for encoder NNs
+    n_layers_dec
+        Number of hidden layers used for decoder NNs
+    dropout_rate_enc
+        Dropout rate for neural networks in encoder
+    dropout_rate_dec
+        Dropout rate for neural networks in decoder
     log_variational
         Log(data+1) prior to encoding for numerical stability. Not normalization.
     likelihood
@@ -64,8 +68,10 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         n_cats_per_cov: Iterable[int] | None = None,
         n_hidden: int = 128,
         n_latent: int = 10,
-        n_layers: int = 1,
-        dropout_rate: float = 0.1,
+        n_layers_enc: int = 1,
+        n_layers_dec: int = 1,
+        dropout_rate_enc: float = 0.1,
+        dropout_rate_dec: float = 0.0,
         log_variational: bool = True,
         likelihood: Literal["betabinomial", "binomial"] = "betabinomial",
         dispersion: Literal["region", "region-cell", "nu"] = "region",
@@ -88,9 +94,9 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
             n_input * 2,  # Methylated counts and coverage for each feature --> x2
             n_latent,
             n_cat_list=cat_list,
-            n_layers=n_layers,
+            n_layers=n_layers_enc,
             n_hidden=n_hidden,
-            dropout_rate=dropout_rate,
+            dropout_rate=dropout_rate_enc,
             return_dist=True,
             var_activation=torch.nn.functional.softplus,  # Better numerical stability than exp
         )
@@ -101,8 +107,9 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
                 n_latent,
                 num_features,
                 n_cat_list=cat_list,
-                n_layers=n_layers,
+                n_layers=n_layers_dec,
                 n_hidden=n_hidden,
+                dropout_rate = dropout_rate_dec,
             )
 
         if self.dispersion == "region":

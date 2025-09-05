@@ -44,8 +44,10 @@ class METHYLVI(VAEMixin, BSSeqMixin, UnsupervisedTrainingMixin, ArchesMixin, Bas
         Number of nodes per hidden layer.
     n_latent
         Dimensionality of the latent space.
-    n_layers
-        Number of hidden layers used for encoder and decoder NNs.
+    n_layers_enc
+        Number of hidden layers used for encoder NNs.
+    n_layers_dec
+        Number of hidden layers used for decoder NNs.
     **model_kwargs
         Keyword args for :class:`~scvi.external.methylvi.METHYLVAE`
 
@@ -63,7 +65,8 @@ class METHYLVI(VAEMixin, BSSeqMixin, UnsupervisedTrainingMixin, ArchesMixin, Bas
         mdata: MuData,
         n_hidden: int = 128,
         n_latent: int = 10,
-        n_layers: int = 1,
+        n_layers_enc: int = 1,
+        n_layers_dec: int = 1,
         **model_kwargs,
     ):
         super().__init__(mdata)
@@ -89,7 +92,8 @@ class METHYLVI(VAEMixin, BSSeqMixin, UnsupervisedTrainingMixin, ArchesMixin, Bas
             n_input=n_input,
             n_hidden=n_hidden,
             n_latent=n_latent,
-            n_layers=n_layers,
+            n_layers_enc=n_layers_enc,
+            n_layers_dec=n_layers_dec,
             n_batch=n_batch,
             n_cats_per_cov=n_cats_per_cov,
             contexts=self.contexts,
