@@ -76,6 +76,7 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         likelihood: Literal["betabinomial", "binomial"] = "betabinomial",
         dispersion: Literal["region", "region-cell", "nu"] = "region",
         nu_params: dict = None,
+        lin_decoder: bool = False,
     ):
         super().__init__()
         self.n_latent = n_latent
@@ -110,6 +111,7 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
                 n_layers=n_layers_dec,
                 n_hidden=n_hidden,
                 dropout_rate = dropout_rate_dec,
+                linear = lin_decoder,
             )
 
         if self.dispersion == "region":

@@ -462,6 +462,7 @@ class DecoderMETHYLVI(nn.Module):
         inject_covariates: bool = True,
         use_batch_norm: bool = False,
         use_layer_norm: bool = False,
+        linear: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -478,14 +479,26 @@ class DecoderMETHYLVI(nn.Module):
             **kwargs,
         )
 
-        self.px_mu_decoder = nn.Sequential(
-            nn.Linear(n_hidden, n_output),
-            nn.Sigmoid(),
-        )
-        self.px_gamma_decoder = nn.Sequential(
-            nn.Linear(n_hidden, n_output),
-            nn.Sigmoid(),
-        )
+        self.linear = linear 
+
+        if self.linear:
+            self.px_mu_decoder = nn.Sequential(
+                nn.Linear(n_input, n_output),
+                nn.Sigmoid(),
+            )
+            self.px_gamma_decoder = nn.Sequential(
+                nn.Linear(n_input, n_output),
+                nn.Sigmoid(),
+            )
+        else:
+            self.px_mu_decoder = nn.Sequential(
+                nn.Linear(n_hidden, n_output),
+                nn.Sigmoid(),
+            )
+            self.px_gamma_decoder = nn.Sequential(
+                nn.Linear(n_hidden, n_output),
+                nn.Sigmoid(),
+            )
 
     def forward(
         self,
@@ -520,7 +533,12 @@ class DecoderMETHYLVI(nn.Module):
 
         """
         px = self.px_decoder(z, *cat_list)
-        px_mu = self.px_mu_decoder(px)
-        px_gamma = self.px_gamma_decoder(px) if dispersion == "region-cell" else None
+        
+        if self.linear:
+            px_mu = self.px_mu_decoder(z)
+            px_gamma = self.px_gamma_decoder(z) if dispersion == "region-cell" else None
+        else:
+            px_mu = self.px_mu_decoder(px)
+            px_gamma = self.px_gamma_decoder(px) if dispersion == "region-cell" else None
 
         return px_mu, px_gamma
