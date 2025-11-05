@@ -57,6 +57,12 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         * ``'region'`` - dispersion parameter of BetaBinomial is constant per region across cells
         * ``'region-cell'`` - dispersion can differ for every region in every cell
         * ``'nu'`` - dispersion of BetaBinomial(alpha,beta) for every region in every cell
+    nu_params
+        nu_max, m, and b for relationship between concentration and read depth
+    mu_glob
+        Boolean to include global means of PSI across events
+    lin_decoder
+        Boolean to use linear decoder
     """
 
     def __init__(
@@ -76,6 +82,7 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         likelihood: Literal["betabinomial", "binomial"] = "betabinomial",
         dispersion: Literal["region", "region-cell", "nu"] = "region",
         nu_params: dict = None,
+        mu_glob: bool = False,
         lin_decoder: bool = False,
     ):
         super().__init__()
@@ -102,6 +109,18 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
             var_activation=torch.nn.functional.softplus,  # Better numerical stability than exp
         )
 
+        # ----- add mu_glob (shared mu across features) --> INIT FROM DATA? or just N(0,1) nn.Parameter(torch.randn(num_features)) --------
+        self.mu_glob = mu_glob
+        if self.mu_glob:
+            self.mu_vals = nn.Parameter(torch.randn(num_features))
+        else:
+            self.mu_vals = None
+        # else:
+        #     if len(mu_glob) != num_features:
+        #         raise ValueError(f"`mu_glob` must have length {num_features} (events)")
+        #     self.mu_glob = mu_glob 
+
+
         self.decoders = nn.ModuleDict()
         for context, num_features in zip(contexts, num_features_per_context, strict=False):
             self.decoders[context] = DecoderMETHYLVI(
@@ -112,6 +131,8 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
                 n_hidden=n_hidden,
                 dropout_rate = dropout_rate_dec,
                 linear = lin_decoder,
+                mu_glob = mu_glob,
+                mu_vals = self.mu_vals,
             )
 
         if self.dispersion == "region":
@@ -126,16 +147,17 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
 
         if nu_params is None:
             nu_params = {
-                "nu_max": 1.0,
+                "nu_max": 1.0, # --- initialize as nn.Parameter(torch.randn()) ------
                 "m": 1.0,
                 "b": 1.0,
             }
         else:
-            expected_keys = {"nu_max", "m", "b"}
+            expected_keys = {"nu_max", "m", "b"} # ------ in future, if given, use values only as inits unless specified ------
             if set(nu_params.keys()) != expected_keys:
                 raise ValueError(f"`nu_params` must have keys {expected_keys}, but got {nu_params.keys()}")
             
         self.nu_params = nu_params
+
 
     def _get_inference_input(self, tensors):
         """Parse the dictionary to get appropriate args"""
@@ -284,16 +306,14 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
 
         exprs = {}
         for context in self.contexts:
-            px_mu = generative_outputs["px_mu"][context]
+            px_mu = generative_outputs["px_mu"][context] 
             px_gamma = generative_outputs["px_gamma"][context]
             cov = tensors[f"{context}_{METHYLVI_REGISTRY_KEYS.COV_KEY}"]
 
             if self.dispersion == "region":
                 px_gamma = torch.sigmoid(self.px_gamma[context])
             elif self.dispersion == "nu":
-                # # px_gamma = torch.log1p(cov + 1e-5)
-                # a = 1.14*torch.log2(cov +1) - 2.21
-                a = self.nu_params["m"]*torch.log2(cov +1) + self.nu_params["b"]
+                a = self.nu_params["m"]*torch.log2(cov +1) + self.nu_params["b"] # a = 1.14*torch.log2(cov +1) - 2.21
                 px_gamma = self.nu_params["nu_max"] * (1/(1+torch.exp(-a))) #2.14, nu_max * inv_logit(a)
 
             if self.likelihood == "binomial":

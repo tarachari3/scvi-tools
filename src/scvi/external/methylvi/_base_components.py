@@ -463,6 +463,8 @@ class DecoderMETHYLVI(nn.Module):
         use_batch_norm: bool = False,
         use_layer_norm: bool = False,
         linear: bool = False,
+        mu_glob: bool = False,
+        mu_vals: float = None,
         **kwargs,
     ):
         super().__init__()
@@ -480,6 +482,8 @@ class DecoderMETHYLVI(nn.Module):
         )
 
         self.linear = linear 
+        self.mu_glob = mu_glob
+        self.mu_vals = mu_vals
 
         if self.linear:
             self.px_mu_decoder = nn.Sequential(
@@ -536,9 +540,15 @@ class DecoderMETHYLVI(nn.Module):
         
         if self.linear:
             px_mu = self.px_mu_decoder(z)
+            if self.mu_glob:
+                px_mu = torch.sigmoid(px_mu + self.mu_vals)
+                
             px_gamma = self.px_gamma_decoder(z) if dispersion == "region-cell" else None
         else:
             px_mu = self.px_mu_decoder(px)
+            if self.mu_glob:
+                px_mu = torch.sigmoid(px_mu + self.mu_vals)
+                
             px_gamma = self.px_gamma_decoder(px) if dispersion == "region-cell" else None
 
         return px_mu, px_gamma
