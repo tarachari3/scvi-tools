@@ -486,19 +486,30 @@ class DecoderMETHYLVI(nn.Module):
         self.mu_vals = mu_vals
 
         if self.linear:
-            self.px_mu_decoder = nn.Sequential(
-                nn.Linear(n_input, n_output),
-                nn.Sigmoid(),
-            )
+            if self.mu_glob: #No sigmoid() yet
+                    self.px_mu_decoder = nn.Sequential(
+                    nn.Linear(n_input, n_output),
+                )
+            else:
+                self.px_mu_decoder = nn.Sequential(
+                    nn.Linear(n_input, n_output),
+                    nn.Sigmoid(),
+                )
+
             self.px_gamma_decoder = nn.Sequential(
                 nn.Linear(n_input, n_output),
                 nn.Sigmoid(),
             )
         else:
-            self.px_mu_decoder = nn.Sequential(
-                nn.Linear(n_hidden, n_output),
-                nn.Sigmoid(),
-            )
+            if self.mu_glob:
+                self.px_mu_decoder = nn.Sequential(
+                    nn.Linear(n_hidden, n_output),
+                )
+            else:
+                self.px_mu_decoder = nn.Sequential(
+                    nn.Linear(n_hidden, n_output),
+                    nn.Sigmoid(),
+                )
             self.px_gamma_decoder = nn.Sequential(
                 nn.Linear(n_hidden, n_output),
                 nn.Sigmoid(),
@@ -548,7 +559,7 @@ class DecoderMETHYLVI(nn.Module):
             px_mu = self.px_mu_decoder(px)
             if self.mu_glob:
                 px_mu = torch.sigmoid(px_mu + self.mu_vals)
-                
+
             px_gamma = self.px_gamma_decoder(px) if dispersion == "region-cell" else None
 
         return px_mu, px_gamma

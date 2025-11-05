@@ -88,6 +88,12 @@ class METHYLVI(VAEMixin, BSSeqMixin, UnsupervisedTrainingMixin, ArchesMixin, Bas
 
         n_input = np.sum(self.num_features_per_context)
 
+        # -- initialize mu with data ---
+        mean_ps = np.nanmean((mdata['mCG'].layers['mc']/mdata['mCG'].layers['cov']),axis=0)
+        mean_ps = np.clip(mean_ps,1e-6,1-1e-6)
+        mu_inits = np.log(mean_ps/(1-mean_ps))
+
+
         self.module = METHYLVAE(
             n_input=n_input,
             n_hidden=n_hidden,
@@ -98,6 +104,7 @@ class METHYLVI(VAEMixin, BSSeqMixin, UnsupervisedTrainingMixin, ArchesMixin, Bas
             n_cats_per_cov=n_cats_per_cov,
             contexts=self.contexts,
             num_features_per_context=self.num_features_per_context,
+            mu_inits = torch.tensor(mu_inits, dtype=torch.float32),
             **model_kwargs,
         )
         self._model_summary_string = (
