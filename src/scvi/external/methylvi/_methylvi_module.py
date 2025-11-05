@@ -114,7 +114,7 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         self.mu_glob = mu_glob
         
         if self.mu_glob:
-            self.mu_vals = torch.randn(num_features_per_context[0]) #nn.Parameter(mu_inits)  + 
+            self.mu_vals = nn.Parameter(mu_inits + torch.randn(num_features_per_context[0]))
         else:
             self.mu_vals = None
         # else:
