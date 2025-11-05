@@ -113,7 +113,7 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         # ----- add mu_glob (shared mu across features) --> INIT FROM DATA? or just N(0,1) nn.Parameter(torch.randn(num_features)) --------
         self.mu_glob = mu_glob
         if self.mu_glob:
-            self.mu_vals = nn.Parameter(mu_inits)  #torch.randn(num_features_per_context[0])
+            self.mu_vals = nn.Parameter(mu_inits)  + torch.randn(num_features_per_context[0])
         else:
             self.mu_vals = None
         # else:
