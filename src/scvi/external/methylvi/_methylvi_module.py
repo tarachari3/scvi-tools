@@ -82,7 +82,7 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         likelihood: Literal["betabinomial", "binomial"] = "betabinomial",
         dispersion: Literal["region", "region-cell", "nu"] = "region",
         nu_params: dict = None,
-        mu_glob: bool = False,
+        mu_glob: Literal["none","random", "empirical"] = "none",
         mu_inits: float = None,
         lin_decoder: bool = False,
     ):
@@ -113,8 +113,10 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         # ----- add mu_glob (shared mu across features) --> INIT FROM DATA? or just N(0,1) nn.Parameter(torch.randn(num_features)) --------
         self.mu_glob = mu_glob
         
-        if self.mu_glob:
+        if self.mu_glob == "empirical":
             self.mu_vals = nn.Parameter(mu_inits + torch.randn(num_features_per_context[0]))
+        elif self.mu_glob == "random":
+            self.mu_vals = nn.Parameter(torch.randn(num_features_per_context[0]))
         else:
             self.mu_vals = None
         # else:
@@ -133,7 +135,7 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
                 n_hidden=n_hidden,
                 dropout_rate = dropout_rate_dec,
                 linear = lin_decoder,
-                mu_glob = mu_glob,
+                mu_glob = (mu_glob != "none"),
                 mu_vals = self.mu_vals,
             )
 
