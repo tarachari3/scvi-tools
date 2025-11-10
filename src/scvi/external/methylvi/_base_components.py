@@ -403,7 +403,7 @@ class BSSeqModuleMixin:
                 # # px_gamma = torch.log1p(cov + 1e-5)
                 #a = 1.14*torch.log2(cov +1) - 2.21
                 a = self.nu_params["m"]*torch.log2(cov +1) + self.nu_params["b"]
-                px_gamma = self.nu_params["nu_max"] * (1/(1+torch.exp(-a))) #2.14, nu_max * inv_logit(a)
+                px_gamma = torch.exp(self.nu_params["nu_max"]) * (1/(1+torch.exp(-a))) #2.14, nu_max * inv_logit(a), keep nu_max > 0
 
             if self.likelihood == "binomial":
                 dist = Binomial(probs=px_mu, total_count=cov)

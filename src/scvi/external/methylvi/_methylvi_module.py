@@ -82,6 +82,7 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         likelihood: Literal["betabinomial", "binomial"] = "betabinomial",
         dispersion: Literal["region", "region-cell", "nu"] = "region",
         nu_params: dict = None,
+        learn_nu: bool = False,
         mu_glob: Literal["none","random", "empirical"] = "none",
         mu_inits: float = None,
         lin_decoder: bool = False,
@@ -153,14 +154,22 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
             nu_params = {
                 "nu_max": 1.0, # --- initialize as nn.Parameter(torch.randn()) ------
                 "m": 1.0,
-                "b": 1.0,
+                "b": -1.0,
             }
         else:
             expected_keys = {"nu_max", "m", "b"} # ------ in future, if given, use values only as inits unless specified ------
             if set(nu_params.keys()) != expected_keys:
                 raise ValueError(f"`nu_params` must have keys {expected_keys}, but got {nu_params.keys()}")
             
-        self.nu_params = nu_params
+        #Convert  nu_params to nn.params if learning
+        self.learn_nu = learn_nu  
+        if self.learn_nu: 
+            self.nu_params = nn.ParameterDict({
+                key: nn.Parameter(torch.tensor(float(value)))
+                for key, value in nu_params.items()
+            })
+        else:    
+            self.nu_params = nu_params
 
 
     def _get_inference_input(self, tensors):
@@ -318,7 +327,7 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
                 px_gamma = torch.sigmoid(self.px_gamma[context])
             elif self.dispersion == "nu":
                 a = self.nu_params["m"]*torch.log2(cov +1) + self.nu_params["b"] # a = 1.14*torch.log2(cov +1) - 2.21
-                px_gamma = self.nu_params["nu_max"] * (1/(1+torch.exp(-a))) #2.14, nu_max * inv_logit(a)
+                px_gamma = torch.exp(self.nu_params["nu_max"]) * (1/(1+torch.exp(-a))) #2.14, nu_max * inv_logit(a), keep nu_max > 0
 
             if self.likelihood == "binomial":
                 dist = Binomial(probs=px_mu, total_count=cov)
