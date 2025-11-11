@@ -169,7 +169,10 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
                 for key, value in nu_params.items()
             })
         else:    
-            self.nu_params = nu_params
+            self.nu_params = {
+                key: torch.tensor(float(value))
+                for key, value in nu_params.items()
+            }
 
 
     def _get_inference_input(self, tensors):
