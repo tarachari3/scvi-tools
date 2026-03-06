@@ -206,10 +206,6 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             self.register_buffer("library_log_means", torch.from_numpy(library_log_means).float())
             self.register_buffer("library_log_vars", torch.from_numpy(library_log_vars).float())
 
-        if (self.batch_representation == 'embedding') and (tech_only_batch):
-            raise ValueError(
-                "Batch_representation 'embedding' and tech_only_batch model cannot be used together."
-            )
 
         if self.dispersion == "gene":
             self.px_r = torch.nn.Parameter(torch.randn(n_input))
@@ -225,6 +221,11 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             )
 
         self.batch_representation = batch_representation
+        if (self.batch_representation == 'embedding') and (tech_only_batch):
+            raise ValueError(
+                "Batch_representation 'embedding' and tech_only_batch model cannot be used together."
+            )
+        
         if self.batch_representation == "embedding":
             self.init_embedding(REGISTRY_KEYS.BATCH_KEY, n_batch, **(batch_embedding_kwargs or {}))
             batch_dim = self.get_embedding(REGISTRY_KEYS.BATCH_KEY).embedding_dim
