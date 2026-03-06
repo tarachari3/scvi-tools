@@ -76,6 +76,8 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         * ``"normal"``: isotropic normal.
         * ``"ln"``: logistic normal with normal params N(0, 1).
+    tech_only_batch
+        If ``True``, only allow batch to influence dispersion and library size parameters. Otherwise default behavior.
     encode_covariates
         If ``True``, covariates are concatenated to gene expression prior to passing through
         the encoder(s). Else, only gene expression is used.
@@ -161,6 +163,7 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         log_variational: bool = True,
         gene_likelihood: Literal["zinb", "nb", "poisson"] = "zinb",
         latent_distribution: Literal["normal", "ln"] = "normal",
+        tech_only_batch: bool = False,
         encode_covariates: bool = False,
         deeply_inject_covariates: bool = True,
         batch_representation: Literal["one-hot", "embedding"] = "one-hot",
@@ -187,6 +190,7 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.n_batch = n_batch
         self.n_labels = n_labels
         self.latent_distribution = latent_distribution
+        self.tech_only_batch = tech_only_batch
         self.encode_covariates = encode_covariates
         self.use_size_factor_key = use_size_factor_key
         self.use_observed_lib_size = use_size_factor_key or use_observed_lib_size
@@ -201,6 +205,11 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
             self.register_buffer("library_log_means", torch.from_numpy(library_log_means).float())
             self.register_buffer("library_log_vars", torch.from_numpy(library_log_vars).float())
+
+        if (self.batch_representation == 'embedding') and (tech_only_batch):
+            raise ValueError(
+                "Batch_representation 'embedding' and tech_only_batch model cannot be used together."
+            )
 
         if self.dispersion == "gene":
             self.px_r = torch.nn.Parameter(torch.randn(n_input))
@@ -232,7 +241,10 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             n_input_encoder += batch_dim * encode_covariates
             cat_list = list([] if n_cats_per_cov is None else n_cats_per_cov)
         else:
-            cat_list = [n_batch] + list([] if n_cats_per_cov is None else n_cats_per_cov)
+            if self.tech_only_batch:
+                cat_list = list([] if n_cats_per_cov is None else n_cats_per_cov) # no batch given
+            else:
+                cat_list = [n_batch] + list([] if n_cats_per_cov is None else n_cats_per_cov)
 
         encoder_cat_list = cat_list if encode_covariates else None
         _extra_encoder_kwargs = extra_encoder_kwargs or {}
@@ -387,16 +399,24 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             encoder_input = torch.cat([encoder_input, batch_rep], dim=-1)
             qz, z = self.z_encoder(encoder_input, *categorical_input)
         else:
-            qz, z = self.z_encoder(encoder_input, batch_index, *categorical_input)
+            if self.tech_only_batch:
+                qz, z = self.z_encoder(encoder_input, *categorical_input)
+            else:
+                qz, z = self.z_encoder(encoder_input, batch_index, *categorical_input)
 
         ql = None
         if not self.use_observed_lib_size:
             if self.batch_representation == "embedding":
                 ql, library_encoded = self.l_encoder(encoder_input, *categorical_input)
             else:
-                ql, library_encoded = self.l_encoder(
-                    encoder_input, batch_index, *categorical_input
-                )
+                if self.tech_only_batch:
+                    ql, library_encoded = self.l_encoder(
+                        encoder_input, *categorical_input
+                    )
+                else:
+                    ql, library_encoded = self.l_encoder(
+                        encoder_input, batch_index, *categorical_input
+                    )
             library = library_encoded
 
         if n_samples > 1:
@@ -497,14 +517,23 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 y,
             )
         else:
-            px_scale, px_r, px_rate, px_dropout = self.decoder(
+            if self.tech_only_batch:
+                px_scale, px_r, px_rate, px_dropout = self.decoder(
                 self.dispersion,
                 decoder_input,
                 size_factor,
-                batch_index,
                 *categorical_input,
                 y,
             )
+            else:
+                px_scale, px_r, px_rate, px_dropout = self.decoder(
+                    self.dispersion,
+                    decoder_input,
+                    size_factor,
+                    batch_index,
+                    *categorical_input,
+                    y,
+                )
 
         if self.dispersion == "gene-label":
             px_r = linear(

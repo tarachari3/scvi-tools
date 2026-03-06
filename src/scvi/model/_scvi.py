@@ -82,6 +82,8 @@ class SCVI(
 
         * ``'normal'`` - Normal distribution
         * ``'ln'`` - Logistic normal distribution (Normal(0, I) transformed by softmax)
+    tech_only_batch
+        If ``True``, only allow batch to influence dispersion and library size parameters. Otherwise default behavior.
     **kwargs
         Additional keyword arguments for :class:`~scvi.module.VAE`.
 
@@ -124,6 +126,7 @@ class SCVI(
         gene_likelihood: Literal["zinb", "nb", "poisson", "normal"] = "zinb",
         use_observed_lib_size: bool = True,
         latent_distribution: Literal["normal", "ln"] = "normal",
+        tech_only_batch: bool = False,
         **kwargs,
     ):
         super().__init__(adata, registry)
@@ -207,6 +210,7 @@ class SCVI(
                 gene_likelihood=gene_likelihood,
                 use_observed_lib_size=use_observed_lib_size,
                 latent_distribution=latent_distribution,
+                tech_only_batch = tech_only_batch,
                 use_size_factor_key=use_size_factor_key,
                 library_log_means=library_log_means,
                 library_log_vars=library_log_vars,
