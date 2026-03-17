@@ -68,6 +68,7 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         Distribution to use for reconstruction in the generative process. One of the following:
 
         * ``"nb"``: :class:`~scvi.distributions.NegativeBinomial`.
+        * ``"nb-cmpd"``: :class:`~scvi.distributions.NegativeBinomial`.
         * ``"zinb"``: :class:`~scvi.distributions.ZeroInflatedNegativeBinomial`.
         * ``"poisson"``: :class:`~scvi.distributions.Poisson`.
         * ``"normal"``: :class:`~torch.distributions.Normal`.
@@ -219,6 +220,11 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             raise ValueError(
                 "`dispersion` must be one of 'gene', 'gene-batch', 'gene-label', 'gene-cell'."
             )
+        
+        # amplification parameter for nb-compound dist
+        if self.gene_likelihood == "nb-cmpd":
+            n_alpha = max(n_batch, 1)
+            self.log_alpha_z = torch.nn.Parameter(torch.zeros(n_alpha))
 
         self.batch_representation = batch_representation
         if (self.batch_representation == 'embedding') and (tech_only_batch):
@@ -296,6 +302,11 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             scale_activation="softplus" if use_size_factor_key else "softmax",
             **_extra_decoder_kwargs,
         )
+
+    @property
+    def alpha_z(self) -> torch.Tensor:
+        """Batch-specific amplification param (alpha_z > 1)."""
+        return 1.0 + torch.exp(self.log_alpha_z)
 
     def _get_inference_input(
         self,
@@ -547,6 +558,23 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         px_r = torch.exp(px_r)
 
+        if self.gene_likelihood == "nb-cmpd":
+            # px_rate (n_cells, n_genes)
+            # px_r = theta_g, alpha_z (n_batch,)
+            if self.n_batch == 0:
+                alpha_per_cell = self.alpha_z[0].expand(px_rate.shape[0]).unsqueeze(-1)
+            else:
+                alpha_per_cell = self.alpha_z[batch_index.squeeze(-1)].unsqueeze(-1) #(n_cells, 1)
+
+            mu = px_rate  # (n_cells, n_genes)
+            theta_g = px_r 
+
+            # theta_eff = mu / ((alpha_z - 1) + mu / theta_g)
+            eps = 1e-6
+            px_r = mu / ((alpha_per_cell - 1.0) + mu / (theta_g + eps)) # px_r = theta_eff (n_cells, n_genes)
+            px_r = torch.clamp(px_r, min=eps) # remove if not needed
+
+
         if self.gene_likelihood == "zinb":
             px = ZeroInflatedNegativeBinomial(
                 mu=px_rate,
@@ -554,7 +582,7 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 zi_logits=px_dropout,
                 scale=px_scale,
             )
-        elif self.gene_likelihood == "nb":
+        elif self.gene_likelihood in ["nb", "nb-cmpd"]:
             px = NegativeBinomial(mu=px_rate, theta=px_r, scale=px_scale)
         elif self.gene_likelihood == "poisson":
             px = Poisson(rate=px_rate, scale=px_scale)

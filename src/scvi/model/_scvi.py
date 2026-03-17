@@ -71,6 +71,7 @@ class SCVI(
         One of:
 
         * ``'nb'`` - Negative binomial distribution
+        * ``'nb-cmpd'`` - Compound negative binomial for smart-seq2 data (Lause et al 2024)
         * ``'zinb'`` - Zero-inflated negative binomial distribution
         * ``'poisson'`` - Poisson distribution
         * ``'normal'`` - ``EXPERIMENTAL`` Normal distribution
@@ -123,7 +124,7 @@ class SCVI(
         n_layers: int = 1,
         dropout_rate: float = 0.1,
         dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
-        gene_likelihood: Literal["zinb", "nb", "poisson", "normal"] = "zinb",
+        gene_likelihood: Literal["zinb", "nb", "poisson", "normal","nb-cmpd"] = "zinb",
         use_observed_lib_size: bool = True,
         latent_distribution: Literal["normal", "ln"] = "normal",
         tech_only_batch: bool = False,
