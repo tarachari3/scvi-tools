@@ -48,6 +48,8 @@ class METHYLVI(VAEMixin, BSSeqMixin, UnsupervisedTrainingMixin, ArchesMixin, Bas
         Number of hidden layers used for encoder NNs.
     n_layers_dec
         Number of hidden layers used for decoder NNs.
+    tech_only_batch
+        If ``True``, only allow batch to influence dispersion and library size parameters. Otherwise default behavior.
     **model_kwargs
         Keyword args for :class:`~scvi.external.methylvi.METHYLVAE`
 
@@ -67,6 +69,7 @@ class METHYLVI(VAEMixin, BSSeqMixin, UnsupervisedTrainingMixin, ArchesMixin, Bas
         n_latent: int = 10,
         n_layers_enc: int = 1,
         n_layers_dec: int = 1,
+        tech_only_batch: bool = False,
         **model_kwargs,
     ):
         super().__init__(mdata)
@@ -105,6 +108,7 @@ class METHYLVI(VAEMixin, BSSeqMixin, UnsupervisedTrainingMixin, ArchesMixin, Bas
             contexts=self.contexts,
             num_features_per_context=self.num_features_per_context,
             mu_inits = torch.tensor(mu_inits, dtype=torch.float32),
+            tech_only_batch = tech_only_batch,
             **model_kwargs,
         )
         self._model_summary_string = (

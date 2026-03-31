@@ -227,7 +227,7 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             self.log_alpha_z = torch.nn.Parameter(torch.zeros(n_alpha))
 
         self.batch_representation = batch_representation
-        if (self.batch_representation == 'embedding') and (tech_only_batch):
+        if (self.batch_representation == 'embedding') and (self.tech_only_batch):
             raise ValueError(
                 "Batch_representation 'embedding' and tech_only_batch model cannot be used together."
             )

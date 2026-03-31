@@ -61,6 +61,10 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         nu_max, m, and b for relationship between concentration and read depth
     mu_glob
         Boolean to include global means of PSI across events
+    mu_inits
+        Initialize values for nu_params
+    tech_only_batch
+        If ``True``, only allow batch to influence dispersion and library size parameters. Otherwise default behavior.
     lin_decoder
         Boolean to use linear decoder
     """
@@ -85,6 +89,7 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         learn_nu: bool = False,
         mu_glob: Literal["none","random", "empirical"] = "none",
         mu_inits: float = None,
+        tech_only_batch: bool = False,
         lin_decoder: bool = False,
     ):
         super().__init__()
@@ -97,8 +102,13 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         self.contexts = contexts
         self.log_variational = log_variational
         self.num_features_per_context = num_features_per_context
+        self.tech_only_batch = tech_only_batch
 
-        cat_list = [n_batch] + list([] if n_cats_per_cov is None else n_cats_per_cov)
+
+        if self.tech_only_batch:
+            cat_list = list([] if n_cats_per_cov is None else n_cats_per_cov)  # no batch in encoder/decoder
+        else:
+            cat_list = [n_batch] + list([] if n_cats_per_cov is None else n_cats_per_cov)
 
         self.z_encoder = Encoder(
             n_input * 2,  # Methylated counts and coverage for each feature --> x2
@@ -163,16 +173,25 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
             
         #Convert  nu_params to nn.params if learning
         self.learn_nu = learn_nu  
-        if self.learn_nu: 
+        n_nu = max(self.n_batch, 1)
+
+        if self.learn_nu:
             self.nu_params = nn.ParameterDict({
-                key: nn.Parameter(torch.tensor(float(value)))
-                for key, value in nu_params.items()
+                "nu_max": nn.Parameter(
+                    torch.tensor(float(nu_params["nu_max"])).expand(n_nu).clone()
+                ),
+                "m": nn.Parameter(
+                    torch.tensor(float(nu_params["m"])).expand(n_nu).clone()
+                ),
+                "b": nn.Parameter(
+                    torch.tensor(float(nu_params["b"])).expand(n_nu).clone()
+                ),
             })
-        else:    
+        else:  
             self.nu_params = {
-                key: torch.tensor(float(value))
+                key: torch.tensor(float(value)).expand(n_nu).clone()
                 for key, value in nu_params.items()
-            }
+            }  
 
 
     def _get_inference_input(self, tensors):
@@ -230,7 +249,10 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         else:
             categorical_input = ()
 
-        qz, z = self.z_encoder(methylation_input, batch_index, *categorical_input)
+        if self.tech_only_batch:
+            qz, z = self.z_encoder(methylation_input, *categorical_input)
+        else:
+            qz, z = self.z_encoder(methylation_input, batch_index, *categorical_input)
         if n_samples > 1:
             z = qz.sample((n_samples,))
 
@@ -248,9 +270,14 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
             categorical_input = ()
 
         for context in self.contexts:
-            px_mu[context], px_gamma[context] = self.decoders[context](
-                self.dispersion, z, batch_index, *categorical_input
-            )
+            if self.tech_only_batch:
+                px_mu[context], px_gamma[context] = self.decoders[context](
+                self.dispersion, z, *categorical_input
+                )
+            else:
+                px_mu[context], px_gamma[context] = self.decoders[context](
+                    self.dispersion, z, batch_index, *categorical_input
+                )
 
         pz = Normal(torch.zeros_like(z), torch.ones_like(z))
 
@@ -325,12 +352,30 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
             px_mu = generative_outputs["px_mu"][context] 
             px_gamma = generative_outputs["px_gamma"][context]
             cov = tensors[f"{context}_{METHYLVI_REGISTRY_KEYS.COV_KEY}"]
+            batch_index = tensors[REGISTRY_KEYS.BATCH_KEY].squeeze(-1)  # (n_cells,)
 
             if self.dispersion == "region":
                 px_gamma = torch.sigmoid(self.px_gamma[context])
             elif self.dispersion == "nu":
-                a = self.nu_params["m"]*torch.log2(cov +1) + self.nu_params["b"] # a = 1.14*torch.log2(cov +1) - 2.21
-                px_gamma = torch.exp(self.nu_params["nu_max"]) * (1/(1+torch.exp(-a))) #2.14, nu_max * inv_logit(a), keep nu_max > 0
+                if self.n_batch == 0:
+                    # single global params
+                    m = self.nu_params["m"][0]
+                    b = self.nu_params["b"][0]
+                    nu_max = self.nu_params["nu_max"][0]
+                else:
+                    # per-batch params indexed by cell
+                    m = self.nu_params["m"][batch_index]         # (n_cells,)
+                    b = self.nu_params["b"][batch_index]         # (n_cells,)
+                    nu_max = self.nu_params["nu_max"][batch_index]  # (n_cells,)
+                    # unsqueeze for broadcasting against (n_cells, n_regions)
+                    m = m.unsqueeze(-1)
+                    b = b.unsqueeze(-1)
+                    nu_max = nu_max.unsqueeze(-1)
+
+                #a = self.nu_params["m"]*torch.log2(cov +1) + self.nu_params["b"]
+                a = m * torch.log2(cov + 1) + b
+                px_gamma = torch.exp(nu_max) * (1/(1+torch.exp(-a))) #2.14, nu_max * inv_logit(a), keep nu_max > 0
+
 
             if self.likelihood == "binomial":
                 dist = Binomial(probs=px_mu, total_count=cov)

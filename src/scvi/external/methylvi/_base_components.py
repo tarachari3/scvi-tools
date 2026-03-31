@@ -10,6 +10,7 @@ from torch import nn
 from torch.distributions import Binomial
 
 from scvi.distributions import BetaBinomial
+from scvi import REGISTRY_KEYS
 from scvi.external.methylvi._utils import METHYLVI_REGISTRY_KEYS
 from scvi.nn import FCLayers
 
@@ -390,6 +391,8 @@ class BSSeqModuleMixin:
 
     def _compute_minibatch_reconstruction_loss(self, minibatch_size, tensors, generative_outputs):
         reconst_loss = torch.zeros(minibatch_size).to(self.device)
+        batch_index = tensors[REGISTRY_KEYS.BATCH_KEY].squeeze(-1)  # (n_cells,)
+
 
         for context in self.contexts:
             px_mu = generative_outputs["px_mu"][context]
@@ -402,8 +405,24 @@ class BSSeqModuleMixin:
             elif self.dispersion == "nu":
                 # # px_gamma = torch.log1p(cov + 1e-5)
                 #a = 1.14*torch.log2(cov +1) - 2.21
-                a = self.nu_params["m"]*torch.log2(cov +1) + self.nu_params["b"]
-                px_gamma = torch.exp(self.nu_params["nu_max"]) * (1/(1+torch.exp(-a))) #2.14, nu_max * inv_logit(a), keep nu_max > 0
+                if self.n_batch == 0:
+                    # single global params
+                    m = self.nu_params["m"][0]
+                    b = self.nu_params["b"][0]
+                    nu_max = self.nu_params["nu_max"][0]
+                else:
+                    # per-batch params indexed by cell
+                    m = self.nu_params["m"][batch_index]         # (n_cells,)
+                    b = self.nu_params["b"][batch_index]         # (n_cells,)
+                    nu_max = self.nu_params["nu_max"][batch_index]  # (n_cells,)
+                    # unsqueeze for broadcasting against (n_cells, n_regions)
+                    m = m.unsqueeze(-1)
+                    b = b.unsqueeze(-1)
+                    nu_max = nu_max.unsqueeze(-1)
+
+                #a = self.nu_params["m"]*torch.log2(cov +1) + self.nu_params["b"]
+                a = m * torch.log2(cov + 1) + b
+                px_gamma = torch.exp(nu_max) * (1/(1+torch.exp(-a))) #2.14, nu_max * inv_logit(a), keep nu_max > 0
 
             if self.likelihood == "binomial":
                 dist = Binomial(probs=px_mu, total_count=cov)
