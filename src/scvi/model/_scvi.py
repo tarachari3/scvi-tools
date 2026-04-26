@@ -85,6 +85,10 @@ class SCVI(
         * ``'ln'`` - Logistic normal distribution (Normal(0, I) transformed by softmax)
     tech_only_batch
         If ``True``, only allow batch to influence dispersion and library size parameters. Otherwise default behavior.
+    batch_mean_correction
+        If ``True``, only use linear scaling of px_rate with batch
+    batch_mean_prior_scale
+        Prior on the log fold change on the mean for batch
     **kwargs
         Additional keyword arguments for :class:`~scvi.module.VAE`.
 
@@ -128,6 +132,8 @@ class SCVI(
         use_observed_lib_size: bool = True,
         latent_distribution: Literal["normal", "ln"] = "normal",
         tech_only_batch: bool = False,
+        batch_mean_correction: bool = False,  
+        batch_mean_prior_scale: float = 0.1,  
         **kwargs,
     ):
         super().__init__(adata, registry)
@@ -212,6 +218,8 @@ class SCVI(
                 use_observed_lib_size=use_observed_lib_size,
                 latent_distribution=latent_distribution,
                 tech_only_batch = tech_only_batch,
+                batch_mean_correction = batch_mean_correction,  
+                batch_mean_prior_scale = batch_mean_prior_scale,
                 use_size_factor_key=use_size_factor_key,
                 library_log_means=library_log_means,
                 library_log_vars=library_log_vars,

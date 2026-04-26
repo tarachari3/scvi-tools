@@ -79,6 +79,10 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         * ``"ln"``: logistic normal with normal params N(0, 1).
     tech_only_batch
         If ``True``, only allow batch to influence dispersion and library size parameters. Otherwise default behavior.
+    batch_mean_correction
+        If ``True``, only use linear scaling of px_rate with batch
+    batch_mean_prior_scale
+        Prior on the log fold change on the mean for batch
     encode_covariates
         If ``True``, covariates are concatenated to gene expression prior to passing through
         the encoder(s). Else, only gene expression is used.
@@ -165,6 +169,8 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         gene_likelihood: Literal["zinb", "nb", "poisson"] = "zinb",
         latent_distribution: Literal["normal", "ln"] = "normal",
         tech_only_batch: bool = False,
+        batch_mean_correction: bool = False,  
+        batch_mean_prior_scale: float = 0.1,  
         encode_covariates: bool = False,
         deeply_inject_covariates: bool = True,
         batch_representation: Literal["one-hot", "embedding"] = "one-hot",
@@ -192,6 +198,9 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         self.n_labels = n_labels
         self.latent_distribution = latent_distribution
         self.tech_only_batch = tech_only_batch
+        self.batch_mean_correction = batch_mean_correction
+        self.batch_mean_prior_scale = batch_mean_prior_scale
+
         self.encode_covariates = encode_covariates
         self.use_size_factor_key = use_size_factor_key
         self.use_observed_lib_size = use_size_factor_key or use_observed_lib_size
@@ -222,18 +231,9 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             )
         
         # amplification parameter for nb-compound dist
-        # if self.gene_likelihood == "nb-cmpd":
-        #     n_alpha = max(n_batch, 1)
-        #     self.log_alpha_z = torch.nn.Parameter(torch.zeros(n_alpha))
-
         if self.gene_likelihood == "nb-cmpd":
-            n_alpha_input = n_latent + max(n_batch, 1)  # latent + one-hot batch
-            self.alpha_z_decoder = torch.nn.Sequential(
-                torch.nn.Linear(n_alpha_input, 32),
-                torch.nn.Softplus(),
-                torch.nn.Linear(32, 1),
-                torch.nn.Softplus(),  # ensures output > 0
-    )
+            n_alpha = max(n_batch, 1)
+            self.log_alpha_z = torch.nn.Parameter(torch.zeros(n_alpha))
 
         self.batch_representation = batch_representation
         if (self.batch_representation == 'embedding') and (self.tech_only_batch):
@@ -261,6 +261,10 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
                 cat_list = list([] if n_cats_per_cov is None else n_cats_per_cov) # no batch given
             else:
                 cat_list = [n_batch] + list([] if n_cats_per_cov is None else n_cats_per_cov)
+
+        # separate cat_list for dropout — batch always sees dropout
+        dropout_cat_list = [n_batch] + list([] if n_cats_per_cov is None else n_cats_per_cov)
+
 
         encoder_cat_list = cat_list if encode_covariates else None
         _extra_encoder_kwargs = extra_encoder_kwargs or {}
@@ -311,11 +315,26 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             scale_activation="softplus" if use_size_factor_key else "softmax",
             **_extra_decoder_kwargs,
         )
+        # --- separate dropout that always takes batch ---
+        if self.tech_only_batch and self.gene_likelihood == "zinb":
+            self.px_dropout_decoder = torch.nn.Sequential(
+                torch.nn.Linear(n_latent + n_batch, n_hidden),
+                torch.nn.ReLU(),
+                torch.nn.Linear(n_hidden, n_input),
+            )
 
-    # @property
-    # def alpha_z(self) -> torch.Tensor:
-    #     """Batch-specific amplification param (alpha_z > 1)."""
-    #     return 1.0 + torch.exp(self.log_alpha_z)
+        # ---- KL-regularized batch correction on mean ---
+        if self.batch_mean_correction and self.tech_only_batch:
+            self.batch_correction_loc   = torch.nn.Embedding(n_batch, n_input)
+            self.batch_correction_scale = torch.nn.Embedding(n_batch, n_input)
+            # initialize to near-zero 
+            torch.nn.init.zeros_(self.batch_correction_loc.weight)
+            torch.nn.init.constant_(self.batch_correction_scale.weight, -3.0)  # softplus(-3) ~ 0.05
+
+    @property
+    def alpha_z(self) -> torch.Tensor:
+        """Batch-specific amplification param (alpha_z > 1)."""
+        return 1.0 + torch.exp(self.log_alpha_z)
 
     def _get_inference_input(
         self,
@@ -567,29 +586,13 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         px_r = torch.exp(px_r)
 
-        # if self.gene_likelihood == "nb-cmpd":
-        #     if self.n_batch == 0:
-        #         alpha_per_cell = self.alpha_z[0].expand(px_rate.shape[0]).unsqueeze(-1)
-        #     else:
-        #         alpha_per_cell = self.alpha_z[batch_index.squeeze(-1)].unsqueeze(-1) #(n_cells, 1)
         if self.gene_likelihood == "nb-cmpd":
-            if self.n_batch > 0:
-                batch_oh = one_hot(batch_index.squeeze(-1), self.n_batch).float()  # (n_cells, n_batch)
+            # px_rate (n_cells, n_genes)
+            # px_r = theta_g, alpha_z (n_batch,)
+            if self.n_batch == 0:
+                alpha_per_cell = self.alpha_z[0].expand(px_rate.shape[0]).unsqueeze(-1)
             else:
-                batch_oh = torch.zeros(z.shape[0], 1, device=z.device)            # (n_cells, 1)
-            
-            # handle n_samples > 1 case where z is (n_samples, n_cells, n_latent)
-            if z.dim() == 3:
-                n_samples, n_cells, _ = z.shape
-                batch_oh_expanded = batch_oh.unsqueeze(0).expand(n_samples, -1, -1)  # (n_samples, n_cells, n_batch)
-                alpha_input = torch.cat([z, batch_oh_expanded], dim=-1)              # (n_samples, n_cells, n_latent+n_batch)
-                alpha_input_flat = alpha_input.reshape(-1, alpha_input.shape[-1])    # (n_samples*n_cells, n_latent+n_batch)
-                alpha_per_cell = 1.0 + self.alpha_z_decoder(alpha_input_flat)        # (n_samples*n_cells, 1)
-                alpha_per_cell = alpha_per_cell.reshape(n_samples, n_cells, 1)       # (n_samples, n_cells, 1)
-            else:
-                alpha_input = torch.cat([z, batch_oh], dim=-1)                       # (n_cells, n_latent+n_batch)
-                alpha_per_cell = 1.0 + self.alpha_z_decoder(alpha_input)             # (n_cells, 1)
-
+                alpha_per_cell = self.alpha_z[batch_index.squeeze(-1)].unsqueeze(-1) #(n_cells, 1)
 
             mu = px_rate  # (n_cells, n_genes)
             theta_g = px_r 
@@ -601,6 +604,30 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
 
         if self.gene_likelihood == "zinb":
+            if self.tech_only_batch:
+                # --- batch → dropout (always) ---
+                batch_oh = one_hot(batch_index.squeeze(-1), self.n_batch).float()  # (n_cells, n_batch)
+                if z.dim() == 3:
+                    batch_oh = batch_oh.unsqueeze(0).expand(z.shape[0], -1, -1)
+                    z_for_dropout = z
+                else:
+                    z_for_dropout = z
+                dropout_input = torch.cat([z_for_dropout.reshape(-1, self.n_latent),
+                                        batch_oh.reshape(-1, self.n_batch)], dim=-1)
+                px_dropout = self.px_dropout_decoder(dropout_input)
+                if z.dim() == 3:
+                    px_dropout = px_dropout.reshape(z.shape[0], z.shape[1], -1)
+                # --- KL-regularized batch correction on mean ---
+                if self.batch_mean_correction:
+                    correction_mu    = self.batch_correction_loc(batch_index.squeeze(-1))    # (n_cells, n_genes)
+                    correction_scale = torch.nn.functional.softplus(
+                        self.batch_correction_scale(batch_index.squeeze(-1))
+                    ) + 1e-4
+                    correction = correction_mu + correction_scale * torch.randn_like(correction_mu)
+                    px_rate = px_rate * torch.exp(correction)
+                    # store for KL computation in loss
+                    self._batch_correction_mu    = correction_mu
+                    self._batch_correction_scale = correction_scale
             px = ZeroInflatedNegativeBinomial(
                 mu=px_rate,
                 theta=px_r,
@@ -640,7 +667,7 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         kl_weight: torch.tensor | float = 1.0,
     ) -> LossOutput:
         """Compute the loss."""
-        from torch.distributions import kl_divergence
+        from torch.distributions import Normal, kl_divergence
 
         x = tensors[REGISTRY_KEYS.X_KEY]
         kl_divergence_z = kl_divergence(
@@ -661,6 +688,16 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
         weighted_kl_local = kl_weight * kl_local_for_warmup + kl_local_no_warmup
 
         loss = torch.mean(reconst_loss + weighted_kl_local)
+
+        #------ KL regularization on batch mean correction -----
+        if self.batch_mean_correction and self.tech_only_batch and self.training:
+            q_correction = Normal(self._batch_correction_mu, self._batch_correction_scale)
+            p_correction  = Normal(
+                torch.zeros_like(self._batch_correction_mu),
+                torch.ones_like(self._batch_correction_mu) * self.batch_mean_prior_scale
+            )
+            kl_correction = kl_divergence(q_correction, p_correction).sum(-1).mean()
+            loss = loss + kl_correction
 
         # a payload to be used during autotune
         if self.extra_payload_autotune:
