@@ -222,9 +222,18 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             )
         
         # amplification parameter for nb-compound dist
+        # if self.gene_likelihood == "nb-cmpd":
+        #     n_alpha = max(n_batch, 1)
+        #     self.log_alpha_z = torch.nn.Parameter(torch.zeros(n_alpha))
+
         if self.gene_likelihood == "nb-cmpd":
-            n_alpha = max(n_batch, 1)
-            self.log_alpha_z = torch.nn.Parameter(torch.zeros(n_alpha))
+            n_alpha_input = n_latent + max(n_batch, 1)  # latent + one-hot batch
+            self.alpha_z_decoder = torch.nn.Sequential(
+                torch.nn.Linear(n_alpha_input, 32),
+                torch.nn.Softplus(),
+                torch.nn.Linear(32, 1),
+                torch.nn.Softplus(),  # ensures output > 0
+    )
 
         self.batch_representation = batch_representation
         if (self.batch_representation == 'embedding') and (self.tech_only_batch):
@@ -303,10 +312,10 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
             **_extra_decoder_kwargs,
         )
 
-    @property
-    def alpha_z(self) -> torch.Tensor:
-        """Batch-specific amplification param (alpha_z > 1)."""
-        return 1.0 + torch.exp(self.log_alpha_z)
+    # @property
+    # def alpha_z(self) -> torch.Tensor:
+    #     """Batch-specific amplification param (alpha_z > 1)."""
+    #     return 1.0 + torch.exp(self.log_alpha_z)
 
     def _get_inference_input(
         self,
@@ -558,13 +567,29 @@ class VAE(EmbeddingModuleMixin, BaseMinifiedModeModuleClass):
 
         px_r = torch.exp(px_r)
 
+        # if self.gene_likelihood == "nb-cmpd":
+        #     if self.n_batch == 0:
+        #         alpha_per_cell = self.alpha_z[0].expand(px_rate.shape[0]).unsqueeze(-1)
+        #     else:
+        #         alpha_per_cell = self.alpha_z[batch_index.squeeze(-1)].unsqueeze(-1) #(n_cells, 1)
         if self.gene_likelihood == "nb-cmpd":
-            # px_rate (n_cells, n_genes)
-            # px_r = theta_g, alpha_z (n_batch,)
-            if self.n_batch == 0:
-                alpha_per_cell = self.alpha_z[0].expand(px_rate.shape[0]).unsqueeze(-1)
+            if self.n_batch > 0:
+                batch_oh = one_hot(batch_index.squeeze(-1), self.n_batch).float()  # (n_cells, n_batch)
             else:
-                alpha_per_cell = self.alpha_z[batch_index.squeeze(-1)].unsqueeze(-1) #(n_cells, 1)
+                batch_oh = torch.zeros(z.shape[0], 1, device=z.device)            # (n_cells, 1)
+            
+            # handle n_samples > 1 case where z is (n_samples, n_cells, n_latent)
+            if z.dim() == 3:
+                n_samples, n_cells, _ = z.shape
+                batch_oh_expanded = batch_oh.unsqueeze(0).expand(n_samples, -1, -1)  # (n_samples, n_cells, n_batch)
+                alpha_input = torch.cat([z, batch_oh_expanded], dim=-1)              # (n_samples, n_cells, n_latent+n_batch)
+                alpha_input_flat = alpha_input.reshape(-1, alpha_input.shape[-1])    # (n_samples*n_cells, n_latent+n_batch)
+                alpha_per_cell = 1.0 + self.alpha_z_decoder(alpha_input_flat)        # (n_samples*n_cells, 1)
+                alpha_per_cell = alpha_per_cell.reshape(n_samples, n_cells, 1)       # (n_samples, n_cells, 1)
+            else:
+                alpha_input = torch.cat([z, batch_oh], dim=-1)                       # (n_cells, n_latent+n_batch)
+                alpha_per_cell = 1.0 + self.alpha_z_decoder(alpha_input)             # (n_cells, 1)
+
 
             mu = px_rate  # (n_cells, n_genes)
             theta_g = px_r 
