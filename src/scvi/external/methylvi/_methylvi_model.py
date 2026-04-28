@@ -237,7 +237,6 @@ class METHYLVI(VAEMixin, BSSeqMixin, UnsupervisedTrainingMixin, ArchesMixin, Bas
             cont_cov_field = fields.MuDataObsmField(
                 REGISTRY_KEYS.CONT_COVS_KEY,
                 fixed_z_key, # X_scvi
-                mod_key=modalities_.obsm_key,  
             )
 
         mudata_fields = mc_fields + cov_fields + [batch_field] + [cat_cov_field]
