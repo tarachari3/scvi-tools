@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from mudata import MuData
 
 import numpy as np
-import sparse
+import sparses
 import torch
 
 from scvi import REGISTRY_KEYS
@@ -148,6 +148,7 @@ class METHYLVI(VAEMixin, BSSeqMixin, UnsupervisedTrainingMixin, ArchesMixin, Bas
         cov_layer: str,
         methylation_contexts: Iterable[str],
         batch_key: str | None = None,
+        fixed_z_key: str | None = None,
         categorical_covariate_keys: list[str] | None = None,
         modalities=None,
         **kwargs,
@@ -179,7 +180,8 @@ class METHYLVI(VAEMixin, BSSeqMixin, UnsupervisedTrainingMixin, ArchesMixin, Bas
             batch_key="Platform",
             methylation_modalities=['mCG', 'mCH'],
             modalities={
-                "batch_key": "mCG"
+                "batch_key": "mCG",
+                "obsm_key": "mCG"
             },
         )
 
@@ -205,6 +207,7 @@ class METHYLVI(VAEMixin, BSSeqMixin, UnsupervisedTrainingMixin, ArchesMixin, Bas
             mod_key=modalities_.categorical_covariate_keys,
         )
 
+
         mc_fields = []
         cov_fields = []
 
@@ -229,7 +232,18 @@ class METHYLVI(VAEMixin, BSSeqMixin, UnsupervisedTrainingMixin, ArchesMixin, Bas
                 )
             )
 
+        cont_cov_field = None
+        if fixed_z_key is not None:
+            cont_cov_field = fields.MuDataObsmField(
+                REGISTRY_KEYS.CONT_COVS_KEY,
+                fixed_z_key, # X_scvi
+                mod_key=modalities_.obsm_key,  
+            )
+
         mudata_fields = mc_fields + cov_fields + [batch_field] + [cat_cov_field]
+        if cont_cov_field is not None:
+            mudata_fields = mudata_fields + [cont_cov_field]
+        
         adata_manager = AnnDataManager(fields=mudata_fields, setup_method_args=setup_method_args)
         adata_manager.register_fields(mdata, **kwargs)
 

@@ -66,7 +66,9 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
     tech_only_batch
         If ``True``, only allow batch to influence dispersion and library size parameters. Otherwise default behavior.
     lin_decoder
-        Boolean to use linear decoder
+        If ``True``, use linear decoder
+    use_fixed_z: bool = False
+        If ``True``, used fixed, given latent space in REGISTRY_KEYS.CONT_COVS_KEY
     """
 
     def __init__(
@@ -91,6 +93,7 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         mu_inits: float = None,
         tech_only_batch: bool = False,
         lin_decoder: bool = False,
+        use_fixed_z: bool = False,
     ):
         super().__init__()
         self.n_latent = n_latent
@@ -103,6 +106,7 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         self.log_variational = log_variational
         self.num_features_per_context = num_features_per_context
         self.tech_only_batch = tech_only_batch
+        self.use_fixed_z = use_fixed_z
 
 
         if self.tech_only_batch:
@@ -110,16 +114,18 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         else:
             cat_list = [n_batch] + list([] if n_cats_per_cov is None else n_cats_per_cov)
 
-        self.z_encoder = Encoder(
-            n_input * 2,  # Methylated counts and coverage for each feature --> x2
-            n_latent,
-            n_cat_list=cat_list,
-            n_layers=n_layers_enc,
-            n_hidden=n_hidden,
-            dropout_rate=dropout_rate_enc,
-            return_dist=True,
-            var_activation=torch.nn.functional.softplus,  # Better numerical stability than exp
-        )
+        # ---- add for fixed x ----
+        if not self.use_fixed_z:
+            self.z_encoder = Encoder(
+                n_input * 2,  # Methylated counts and coverage for each feature --> x2
+                n_latent,
+                n_cat_list=cat_list,
+                n_layers=n_layers_enc,
+                n_hidden=n_hidden,
+                dropout_rate=dropout_rate_enc,
+                return_dist=True,
+                var_activation=torch.nn.functional.softplus,  # Better numerical stability than exp
+            )
 
         # ----- add mu_glob (shared mu across features) --> INIT FROM DATA? or just N(0,1) nn.Parameter(torch.randn(num_features)) --------
         self.mu_glob = mu_glob
@@ -196,26 +202,39 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
 
     def _get_inference_input(self, tensors):
         """Parse the dictionary to get appropriate args"""
-        mc = torch.cat(
-            [tensors[_context_mc_key(context)] for context in self.contexts],
-            dim=1,
-        )
-        cov = torch.cat(
-            [tensors[_context_cov_key(context)] for context in self.contexts],
-            dim=1,
-        )
 
         batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
         cat_key = REGISTRY_KEYS.CAT_COVS_KEY
         cat_covs = tensors[cat_key] if cat_key in tensors.keys() else None
 
-        input_dict = {
-            METHYLVI_REGISTRY_KEYS.MC_KEY: mc,
-            METHYLVI_REGISTRY_KEYS.COV_KEY: cov,
-            "batch_index": batch_index,
-            "cat_covs": cat_covs,
-        }
-        return input_dict
+        if self.use_fixed_z:
+            # don't pass cont_covs to generative to avoid double-counting
+            z_fixed = tensors[REGISTRY_KEYS.CONT_COVS_KEY]  # (n_cells, n_latent)
+            return {
+                METHYLVI_REGISTRY_KEYS.MC_KEY:  torch.zeros(z_fixed.shape[0], 1, device=z_fixed.device),  # not used
+                METHYLVI_REGISTRY_KEYS.COV_KEY: torch.zeros(z_fixed.shape[0], 1, device=z_fixed.device),  # not used
+                "batch_index": batch_index,
+                "cat_covs":    cat_covs,
+                "z_fixed":     z_fixed,
+            }
+        else:
+            mc = torch.cat(
+                [tensors[_context_mc_key(context)] for context in self.contexts],
+                dim=1,
+            )
+            cov = torch.cat(
+                [tensors[_context_cov_key(context)] for context in self.contexts],
+                dim=1,
+            )
+            
+            input_dict = {
+                METHYLVI_REGISTRY_KEYS.MC_KEY: mc,
+                METHYLVI_REGISTRY_KEYS.COV_KEY: cov,
+                "batch_index": batch_index,
+                "cat_covs": cat_covs,
+                "z_fixed":     None,
+            }
+            return input_dict
 
     def _get_generative_input(self, tensors, inference_outputs):
         z = inference_outputs["z"]
@@ -231,12 +250,18 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         return input_dict
 
     @auto_move_data
-    def inference(self, mc, cov, batch_index, cat_covs=None, n_samples=1):
+    def inference(self, mc, cov, batch_index, cat_covs=None, z_fixed=None, n_samples=1):
         """
         High level inference method.
 
         Runs the inference (encoder) model.
         """
+        if self.use_fixed_z:
+            # skip encoder — use fixed z
+            z  = z_fixed
+            qz = None #Normal(z_fixed, torch.ones_like(z_fixed) * 1e-8)  # not used
+            return {"z": z, "qz": qz}
+        
         # log the inputs to the variational distribution for numerical stability
         mc_ = torch.log(1 + mc)
         cov_ = torch.log(1 + cov)
@@ -291,28 +316,47 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         kl_weight: float = 1.0,
     ):
         """Loss function."""
-        qz = inference_outputs["qz"]
-        pz = generative_outputs["pz"]
-        kl_divergence_z = kl(qz, pz).sum(dim=1)
+        if self.use_fixed_z:
+            pz = generative_outputs["pz"]
+            kl_divergence_z = torch.zeros_like(pz.loc[:, 0])
 
-        kl_local_for_warmup = kl_divergence_z
+            minibatch_size = pz.loc.size(0)
+            reconst_loss = self._compute_minibatch_reconstruction_loss(
+                minibatch_size=minibatch_size,
+                tensors=tensors,
+                generative_outputs=generative_outputs,
+            )
+            loss = torch.mean(reconst_loss)
 
-        weighted_kl_local = kl_weight * kl_local_for_warmup
+            kl_local = {"kl_divergence_z": kl_divergence_z}
+            return LossOutput(
+                loss=loss,
+                reconstruction_loss=reconst_loss,
+                kl_local=kl_local,
+            )
+        else:
+            qz = inference_outputs["qz"]
+            pz = generative_outputs["pz"]
+            kl_divergence_z = kl(qz, pz).sum(dim=1)
 
-        minibatch_size = qz.loc.size()[0]
-        reconst_loss = self._compute_minibatch_reconstruction_loss(
-            minibatch_size=minibatch_size,
-            tensors=tensors,
-            generative_outputs=generative_outputs,
-        )
-        loss = torch.mean(reconst_loss + weighted_kl_local)
+            kl_local_for_warmup = kl_divergence_z
 
-        kl_local = {"kl_divergence_z": kl_divergence_z}
-        return LossOutput(
-            loss=loss,
-            reconstruction_loss=reconst_loss,
-            kl_local=kl_local,
-        )
+            weighted_kl_local = kl_weight * kl_local_for_warmup
+
+            minibatch_size = qz.loc.size()[0]
+            reconst_loss = self._compute_minibatch_reconstruction_loss(
+                minibatch_size=minibatch_size,
+                tensors=tensors,
+                generative_outputs=generative_outputs,
+            )
+            loss = torch.mean(reconst_loss + weighted_kl_local)
+
+            kl_local = {"kl_divergence_z": kl_divergence_z}
+            return LossOutput(
+                loss=loss,
+                reconstruction_loss=reconst_loss,
+                kl_local=kl_local,
+            )
 
     @torch.no_grad()
     def sample(
