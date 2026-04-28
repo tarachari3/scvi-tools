@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from mudata import MuData
 
 import numpy as np
-import sparses
+import sparse
 import torch
 
 from scvi import REGISTRY_KEYS
