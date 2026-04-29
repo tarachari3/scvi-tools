@@ -259,7 +259,11 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
         if self.use_fixed_z:
             # skip encoder — use fixed z
             z  = z_fixed
-            qz = None #Normal(z_fixed, torch.ones_like(z_fixed) * 1e-8)  # not used
+            if n_samples > 1:
+                # expand z to (n_samples, n_cells, n_latent)
+                z = z_fixed.unsqueeze(0).expand(n_samples, -1, -1)
+            qz = Normal(z_fixed, torch.ones_like(z_fixed) * 1e-8)
+            #qz = None #Normal(z_fixed, torch.ones_like(z_fixed) * 1e-8)  # not used
             return {"z": z, "qz": qz}
         
         # log the inputs to the variational distribution for numerical stability
@@ -317,10 +321,10 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
     ):
         """Loss function."""
         if self.use_fixed_z:
-            pz = generative_outputs["pz"]
-            kl_divergence_z = torch.zeros_like(pz.loc[:, 0])
+            qz = inference_outputs["qz"]
+            kl_divergence_z = torch.zeros_like(qz.loc[:, 0])
 
-            minibatch_size = pz.loc.size(0)
+            minibatch_size = qz.loc.size()[0]
             reconst_loss = self._compute_minibatch_reconstruction_loss(
                 minibatch_size=minibatch_size,
                 tensors=tensors,
