@@ -156,6 +156,16 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
                 mu_vals = self.mu_vals,
             )
 
+        if self.tech_only_batch and self.dispersion == "region-cell":
+            self.batch_gamma_decoders = nn.ModuleDict()
+            for context, num_features in zip(contexts, num_features_per_context, strict=False):
+                self.batch_gamma_decoders[context] = nn.Sequential(
+                    nn.Linear(n_latent + n_batch, n_hidden),  # n_latent not n_hidden
+                    nn.ReLU(),
+                    nn.Linear(n_hidden, num_features),
+                    nn.Sigmoid(),
+                )
+
         if self.dispersion == "region":
             self.px_gamma = torch.nn.ParameterDict(
                 {
@@ -300,9 +310,24 @@ class METHYLVAE(BaseModuleClass, BSSeqModuleMixin):
 
         for context in self.contexts:
             if self.tech_only_batch:
-                px_mu[context], px_gamma[context] = self.decoders[context](
-                self.dispersion, z, *categorical_input
-                )
+                if self.dispersion == "region-cell":
+                    # mu decoded without batch
+                    px_mu[context], _ = self.decoders[context](
+                        self.dispersion, z, *categorical_input
+                    )
+                    # gamma decoded with batch concatenated to z directly
+                    batch_oh = torch.nn.functional.one_hot(
+                        batch_index.squeeze(-1), self.n_batch
+                    ).float()
+                    #  n_samples > 1
+                    if z.dim() == 3:
+                        batch_oh = batch_oh.unsqueeze(0).expand(z.shape[0], -1, -1) # (n_samples, n_cells, n_batch)
+                    gamma_input = torch.cat([z, batch_oh], dim=-1)  # (..., n_latent+n_batch)
+                    px_gamma[context] = self.batch_gamma_decoders[context](gamma_input)
+                else:
+                    px_mu[context], px_gamma[context] = self.decoders[context](
+                    self.dispersion, z, *categorical_input
+                    )
             else:
                 px_mu[context], px_gamma[context] = self.decoders[context](
                     self.dispersion, z, batch_index, *categorical_input
