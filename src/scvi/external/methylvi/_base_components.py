@@ -337,15 +337,26 @@ class BSSeqMixin:
         def change_fn(a, b,pseudocounts=None): # need to use same change-based DE as scvi
             return a - b
 
+        # if two_sided:
+
+        #     def m1_domain_fn(samples):
+        #         return np.abs(samples) >= delta
+
+        # else:
+
+        #     def m1_domain_fn(samples):
+        #         return samples >= delta
+
         if two_sided:
-
             def m1_domain_fn(samples):
-                return np.abs(samples) >= delta
-
+                samples_plus = samples >= delta
+                samples_minus = samples < -delta
+                return samples_plus, samples_minus
         else:
-
             def m1_domain_fn(samples):
-                return samples >= delta
+                samples_plus = samples >= delta
+                samples_minus = np.zeros_like(samples_plus, dtype=bool)
+                return samples_plus, samples_minus
 
         result = {}
         for context in self.contexts:
