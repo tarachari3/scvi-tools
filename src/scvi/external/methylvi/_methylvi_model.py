@@ -252,6 +252,7 @@ class METHYLVI(VAEMixin, BSSeqMixin, UnsupervisedTrainingMixin, ArchesMixin, Bas
     def posterior_predictive_sample(
         self,
         mdata: MuData | None = None,
+        indices: Sequence[int] | None = None,
         n_samples: int = 1,
         batch_size: int | None = None,
     ) -> dict[str, sparse.GCXS] | sparse.GCXS:

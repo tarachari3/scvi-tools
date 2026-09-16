@@ -334,7 +334,7 @@ class BSSeqMixin:
         """
         mdata = self._validate_anndata(mdata)
 
-        def change_fn(a, b):
+        def change_fn(a, b,pseudocounts=None): # need to use same change-based DE as scvi
             return a - b
 
         if two_sided:
