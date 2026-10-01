@@ -518,16 +518,16 @@ class DecoderMETHYLVI(nn.Module):
         if self.linear:
             if self.mu_glob: #No sigmoid() yet
                     self.px_mu_decoder = nn.Sequential(
-                    nn.Linear(n_input, n_output),
+                    nn.Linear(n_input, n_output,bias=False),
                 )
             else:
                 self.px_mu_decoder = nn.Sequential(
-                    nn.Linear(n_input, n_output),
+                    nn.Linear(n_input, n_output,bias=False),
                     nn.Sigmoid(),
                 )
 
             self.px_gamma_decoder = nn.Sequential(
-                nn.Linear(n_input, n_output),
+                nn.Linear(n_input, n_output,bias=False),
                 nn.Sigmoid(),
             )
         else:
