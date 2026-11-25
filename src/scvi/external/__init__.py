@@ -3,6 +3,7 @@ from .contrastivevi import ContrastiveVI
 from .decipher import Decipher
 from .gimvi import GIMVI
 from .methylvi import METHYLANVI, METHYLVI
+from .psivi import PSIVI
 from .mrvi import MRVI
 from .poissonvi import POISSONVI
 from .resolvi import RESOLVI
@@ -34,6 +35,7 @@ __all__ = [
     "MRVI",
     "METHYLVI",
     "METHYLANVI",
+    "PSIVI",
     "RESOLVI",
     "SCVIVA",
 ]

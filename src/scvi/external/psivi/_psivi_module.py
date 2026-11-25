@@ -1,0 +1,451 @@
+"""PyTorch module for psiVI for single cell splicing data."""
+
+from collections.abc import Iterable
+from typing import Literal
+
+import torch
+import torch.nn as nn
+from torch.distributions import Normal
+from torch.distributions import kl_divergence as kl
+
+from scvi import REGISTRY_KEYS
+from scvi.distributions import BetaBinomial
+from scvi.external.psivi import PSIVI_REGISTRY_KEYS, DecoderPSIVI
+from scvi.external.psivi._base_components import PSIModuleMixin
+from scvi.external.psivi._utils import _context_cov_key, _context_mc_key
+from scvi.module.base import BaseModuleClass, LossOutput, auto_move_data
+from scvi.nn import Encoder
+
+TensorDict = dict[str, torch.Tensor]
+
+
+class PSIVAE(BaseModuleClass, PSIModuleMixin):
+    """PyTorch module for psiVI.
+
+    Parameters
+    ----------
+    n_input
+        Total number of input events
+    contexts
+        Mudata modalities for PSI inference (e.g. ["SJ"])
+    num_features_per_context
+        Number of features corresponding to the context/modality
+    n_batch
+        Number of batches, if 0, no batch correction is performed
+    n_cats_per_cov
+        Number of categories for each extra categorical covariate
+    n_hidden
+        Number of nodes per hidden layer
+    n_latent
+        Dimensionality of the latent space
+    n_layers_enc
+        Number of hidden layers used for encoder NNs
+    n_layers_dec
+        Number of hidden layers used for decoder NNs
+    dropout_rate_enc
+        Dropout rate for neural networks in encoder
+    dropout_rate_dec
+        Dropout rate for neural networks in decoder
+    log_variational
+        Log(data+1) prior to encoding for numerical stability. Not normalization.
+    likelihood
+        * ``'betabinomial'`` - BetaBinomial distribution
+    dispersion
+        One of the following
+        * ``'event'`` - dispersion parameter of BetaBinomial per event across cells
+        * ``'event-cell'`` - dispersion can differ for every event in every cell
+        * ``'capture'`` - RNA-capture-based concentration param for BetaBinomial, per event in every cell
+    mu_glob
+        Boolean to include global means of PSI across events
+    mu_inits
+        Initialize values for nu_params
+    tech_only_batch
+        If ``True``, only allow batch to influence dispersion and library size parameters. Otherwise default behavior.
+    lin_decoder
+        If ``True``, use linear decoder
+    user_z: bool = False
+        If ``True``, use user given latent space in REGISTRY_KEYS.CONT_COVS_KEY
+    """
+
+    def __init__(
+        self,
+        n_input: int,
+        contexts: Iterable[str],
+        num_features_per_context: Iterable[int],
+        n_batch: int = 0,
+        n_cats_per_cov: Iterable[int] | None = None,
+        n_hidden: int = 128,
+        n_latent: int = 10,
+        n_layers_enc: int = 1,
+        n_layers_dec: int = 1,
+        dropout_rate_enc: float = 0.1,
+        dropout_rate_dec: float = 0.0,
+        log_variational: bool = True,
+        likelihood: Literal["betabinomial"] = "betabinomial",
+        dispersion: Literal["event", "event-cell", "capture"] = "capture",
+        tech_only_batch: bool = False,
+        mu_glob: Literal["none","random", "empirical"] = "empirical",
+        mu_inits: float = None,
+        lin_decoder: bool = False,
+        user_z: bool = False,
+    ):
+        super().__init__()
+        self.n_latent = n_latent
+        self.n_batch = n_batch
+
+        self.latent_distribution = "normal"
+        self.dispersion = dispersion
+        self.likelihood = likelihood
+        self.contexts = contexts
+        self.log_variational = log_variational
+        self.num_features_per_context = num_features_per_context
+        self.tech_only_batch = tech_only_batch
+        self.use_fixed_z = user_z
+
+
+        if self.tech_only_batch:
+            cat_list = list([] if n_cats_per_cov is None else n_cats_per_cov)  # no batch in encoder/decoder
+        else:
+            cat_list = [n_batch] + list([] if n_cats_per_cov is None else n_cats_per_cov)
+
+        # ---- add for fixed x ----
+        if not self.use_fixed_z:
+            self.z_encoder = Encoder(
+                n_input * 2,  # Methylated counts and coverage for each feature --> x2
+                n_latent,
+                n_cat_list=cat_list,
+                n_layers=n_layers_enc,
+                n_hidden=n_hidden,
+                dropout_rate=dropout_rate_enc,
+                return_dist=True,
+                var_activation=torch.nn.functional.softplus,  # Better numerical stability than exp
+            )
+
+        # ----- add mu_glob (shared mu across features) --> INIT FROM DATA? or just N(0,1) nn.Parameter(torch.randn(num_features)) --------
+        self.mu_glob = mu_glob
+        
+        if self.mu_glob == "empirical":
+            self.mu_vals = nn.Parameter(mu_inits + torch.randn(num_features_per_context[0]))
+        elif self.mu_glob == "random":
+            self.mu_vals = nn.Parameter(torch.randn(num_features_per_context[0]))
+        else:
+            self.mu_vals = None
+        # else:
+        #     if len(mu_glob) != num_features:
+        #         raise ValueError(f"`mu_glob` must have length {num_features} (events)")
+        #     self.mu_glob = mu_glob 
+
+
+        self.decoders = nn.ModuleDict()
+        for context, num_features in zip(contexts, num_features_per_context, strict=False):
+            self.decoders[context] = DecoderPSIVI(
+                n_latent,
+                num_features,
+                n_cat_list=cat_list,
+                n_layers=n_layers_dec,
+                n_hidden=n_hidden,
+                dropout_rate = dropout_rate_dec,
+                linear = lin_decoder,
+                mu_glob = (mu_glob != "none"),
+                mu_vals = self.mu_vals,
+            )
+
+        if self.tech_only_batch and self.dispersion == "event-cell":
+            self.batch_gamma_decoders = nn.ModuleDict()
+            for context, num_features in zip(contexts, num_features_per_context, strict=False):
+                self.batch_gamma_decoders[context] = nn.Sequential(
+                    nn.Linear(n_latent + n_batch, n_hidden),  # n_latent not n_hidden
+                    nn.ReLU(),
+                    nn.Linear(n_hidden, num_features),
+                    nn.Sigmoid(),
+                )
+
+        if self.dispersion == "event":
+            self.px_gamma = torch.nn.ParameterDict(
+                {
+                    context: nn.Parameter(torch.randn(num_features))
+                    for (context, num_features) in zip(
+                        contexts, num_features_per_context, strict=False
+                    )
+                }
+            )
+
+
+        nu_params = {
+            "nu_max": 1.0, # --- initialize as nn.Parameter(torch.randn()) ------
+            "m": 1.0,
+            "b": -1.0,
+        }
+            
+        #Convert  nu_params to nn.params if learning
+        n_nu = max(self.n_batch, 1)
+        self.nu_params = nn.ParameterDict({
+            "nu_max": nn.Parameter(
+                torch.tensor(float(nu_params["nu_max"])).expand(n_nu).clone()
+            ),
+            "m": nn.Parameter(
+                torch.tensor(float(nu_params["m"])).expand(n_nu).clone()
+            ),
+            "b": nn.Parameter(
+                torch.tensor(float(nu_params["b"])).expand(n_nu).clone()
+            ),
+        })
+
+
+
+    def _get_inference_input(self, tensors):
+        """Parse the dictionary to get appropriate args"""
+
+        batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
+        cat_key = REGISTRY_KEYS.CAT_COVS_KEY
+        cat_covs = tensors[cat_key] if cat_key in tensors.keys() else None
+
+        if self.use_fixed_z:
+            # don't pass cont_covs to generative to avoid double-counting
+            z_fixed = tensors[REGISTRY_KEYS.CONT_COVS_KEY]  # (n_cells, n_latent)
+            return {
+                PSIVI_REGISTRY_KEYS.MC_KEY:  torch.zeros(z_fixed.shape[0], 1, device=z_fixed.device),  # not used
+                PSIVI_REGISTRY_KEYS.COV_KEY: torch.zeros(z_fixed.shape[0], 1, device=z_fixed.device),  # not used
+                "batch_index": batch_index,
+                "cat_covs":    cat_covs,
+                "z_fixed":     z_fixed,
+            }
+        else:
+            mc = torch.cat(
+                [tensors[_context_mc_key(context)] for context in self.contexts],
+                dim=1,
+            )
+            cov = torch.cat(
+                [tensors[_context_cov_key(context)] for context in self.contexts],
+                dim=1,
+            )
+            
+            input_dict = {
+                PSIVI_REGISTRY_KEYS.MC_KEY: mc,
+                PSIVI_REGISTRY_KEYS.COV_KEY: cov,
+                "batch_index": batch_index,
+                "cat_covs": cat_covs,
+                "z_fixed":     None,
+            }
+            return input_dict
+
+    def _get_generative_input(self, tensors, inference_outputs):
+        z = inference_outputs["z"]
+        batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
+        cat_key = REGISTRY_KEYS.CAT_COVS_KEY
+        cat_covs = tensors[cat_key] if cat_key in tensors.keys() else None
+
+        input_dict = {
+            "z": z,
+            "batch_index": batch_index,
+            "cat_covs": cat_covs,
+        }
+        return input_dict
+
+    @auto_move_data
+    def inference(self, mc, cov, batch_index, cat_covs=None, z_fixed=None, n_samples=1):
+        """
+        High level inference method.
+
+        Runs the inference (encoder) model.
+        """
+        if self.use_fixed_z:
+            # skip encoder — use fixed z
+            z  = z_fixed
+            if n_samples > 1:
+                # expand z to (n_samples, n_cells, n_latent)
+                z = z_fixed.unsqueeze(0).expand(n_samples, -1, -1)
+            qz = Normal(z_fixed, torch.ones_like(z_fixed) * 1e-8)
+            #qz = None #Normal(z_fixed, torch.ones_like(z_fixed) * 1e-8)  # not used
+            return {"z": z, "qz": qz}
+        
+        # log the inputs to the variational distribution for numerical stability
+        mc_ = torch.log(1 + mc)
+        cov_ = torch.log(1 + cov)
+
+        # get variational parameters via the encoder networks
+        # we input both the inclusion reads (mc) and coverage (cov)
+        psi_input = torch.cat((mc_, cov_), dim=-1)
+        if cat_covs is not None:
+            categorical_input = torch.split(cat_covs, 1, dim=1)
+        else:
+            categorical_input = ()
+
+        if self.tech_only_batch:
+            qz, z = self.z_encoder(psi_input, *categorical_input)
+        else:
+            qz, z = self.z_encoder(psi_input, batch_index, *categorical_input)
+        if n_samples > 1:
+            z = qz.sample((n_samples,))
+
+        outputs = {"z": z, "qz": qz}
+        return outputs
+
+    @auto_move_data
+    def generative(self, z, batch_index, cat_covs=None):
+        """Runs the generative model."""
+        # form the parameters of the BetaBinomial likelihood
+        px_mu, px_gamma = {}, {}
+        if cat_covs is not None:
+            categorical_input = torch.split(cat_covs, 1, dim=1)
+        else:
+            categorical_input = ()
+
+        for context in self.contexts:
+            if self.tech_only_batch:
+                if self.dispersion == "event-cell":
+                    # mu decoded without batch
+                    px_mu[context], _ = self.decoders[context](
+                        self.dispersion, z, *categorical_input
+                    )
+                    # gamma decoded with batch concatenated to z directly
+                    batch_oh = torch.nn.functional.one_hot(
+                        batch_index.squeeze(-1), self.n_batch
+                    ).float()
+                    #  n_samples > 1
+                    if z.dim() == 3:
+                        batch_oh = batch_oh.unsqueeze(0).expand(z.shape[0], -1, -1) # (n_samples, n_cells, n_batch)
+                    gamma_input = torch.cat([z, batch_oh], dim=-1)  # (..., n_latent+n_batch)
+                    px_gamma[context] = self.batch_gamma_decoders[context](gamma_input)
+                else:
+                    px_mu[context], px_gamma[context] = self.decoders[context](
+                    self.dispersion, z, *categorical_input
+                    )
+            else:
+                px_mu[context], px_gamma[context] = self.decoders[context](
+                    self.dispersion, z, batch_index, *categorical_input
+                )
+
+        pz = Normal(torch.zeros_like(z), torch.ones_like(z))
+
+        return {"px_mu": px_mu, "px_gamma": px_gamma, "pz": pz}
+
+    def loss(
+        self,
+        tensors,
+        inference_outputs,
+        generative_outputs,
+        kl_weight: float = 1.0,
+    ):
+        """Loss function."""
+        if self.use_fixed_z:
+            qz = inference_outputs["qz"]
+            kl_divergence_z = torch.zeros_like(qz.loc[:, 0])
+
+            minibatch_size = qz.loc.size()[0]
+            reconst_loss = self._compute_minibatch_reconstruction_loss(
+                minibatch_size=minibatch_size,
+                tensors=tensors,
+                generative_outputs=generative_outputs,
+            )
+            loss = torch.mean(reconst_loss)
+
+            kl_local = {"kl_divergence_z": kl_divergence_z}
+            return LossOutput(
+                loss=loss,
+                reconstruction_loss=reconst_loss,
+                kl_local=kl_local,
+            )
+        else:
+            qz = inference_outputs["qz"]
+            pz = generative_outputs["pz"]
+            kl_divergence_z = kl(qz, pz).sum(dim=1)
+
+            kl_local_for_warmup = kl_divergence_z
+
+            weighted_kl_local = kl_weight * kl_local_for_warmup
+
+            minibatch_size = qz.loc.size()[0]
+            reconst_loss = self._compute_minibatch_reconstruction_loss(
+                minibatch_size=minibatch_size,
+                tensors=tensors,
+                generative_outputs=generative_outputs,
+            )
+            loss = torch.mean(reconst_loss + weighted_kl_local)
+
+            kl_local = {"kl_divergence_z": kl_divergence_z}
+            return LossOutput(
+                loss=loss,
+                reconstruction_loss=reconst_loss,
+                kl_local=kl_local,
+            )
+
+    @torch.no_grad()
+    def sample(
+        self,
+        tensors,
+        n_samples=1,
+    ) -> dict[torch.Tensor]:
+        r"""
+        Generate observation samples from the posterior predictive distribution.
+
+        The posterior predictive distribution is written as :math:`p(\hat{x} \mid x)`.
+
+        Parameters
+        ----------
+        tensors
+            Tensors dict
+        n_samples
+            Number of required samples for each cell
+
+        Returns
+        -------
+        x_new
+            tensor with shape (n_cells, n_regions, n_samples)
+        """
+        inference_kwargs = {"n_samples": n_samples}
+        (
+            _,
+            generative_outputs,
+        ) = self.forward(
+            tensors,
+            inference_kwargs=inference_kwargs,
+            compute_loss=False,
+        )
+
+        exprs = {}
+        for context in self.contexts:
+            px_mu = generative_outputs["px_mu"][context] 
+            px_gamma = generative_outputs["px_gamma"][context]
+            cov = tensors[f"{context}_{PSIVI_REGISTRY_KEYS.COV_KEY}"]
+            batch_index = tensors[REGISTRY_KEYS.BATCH_KEY].squeeze(-1)  # (n_cells,)
+
+            if self.dispersion == "event":
+                px_gamma = torch.sigmoid(self.px_gamma[context])
+            elif self.dispersion == "capture":
+                if self.n_batch == 0:
+                    # single global params
+                    m = self.nu_params["m"][0]
+                    b = self.nu_params["b"][0]
+                    nu_max = self.nu_params["nu_max"][0]
+                else:
+                    # per-batch params indexed by cell
+                    m = self.nu_params["m"][batch_index]         # (n_cells,)
+                    b = self.nu_params["b"][batch_index]         # (n_cells,)
+                    nu_max = self.nu_params["nu_max"][batch_index]  # (n_cells,)
+                    # unsqueeze for broadcasting against (n_cells, n_regions)
+                    m = m.unsqueeze(-1)
+                    b = b.unsqueeze(-1)
+                    nu_max = nu_max.unsqueeze(-1)
+
+                #a = self.nu_params["m"]*torch.log2(cov +1) + self.nu_params["b"]
+                a = m * torch.log2(cov + 1) + b
+                px_gamma = torch.exp(nu_max) * (1/(1+torch.exp(-a))) #2.14, nu_max * inv_logit(a), keep nu_max > 0
+
+
+
+            if self.likelihood == "betabinomial": # in future may add models
+                if self.dispersion == "capture":
+                    px_gamma = 1 / (px_gamma + 1)
+                dist = BetaBinomial(mu=px_mu, gamma=px_gamma, total_count=cov)
+                
+
+            if n_samples > 1:
+                exprs_ = dist.sample()
+                exprs[context] = exprs_.permute(
+                    [1, 2, 0]
+                ).cpu()  # Shape : (n_cells_batch, n_regions, n_samples)
+            else:
+                exprs[context] = dist.sample().cpu()
+
+        return exprs
